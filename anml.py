@@ -97,8 +97,8 @@ class Function(object):
     def __init__(self, name, params, body, table):
         self.name = name
         self.params = params
-        # lexical scope: unwrap any bound variables
-        self.body = body.unwrap()
+        # partial application: unwrap any bound variables
+        self.body = [expr.unwrap() for expr in body]
         self.table = table
 
     def run(self):
@@ -111,15 +111,19 @@ class Function(object):
         assert(len(args) == len(self.params))
 
         for i, arg in enumerate(args):
-            self.params[i].value = arg
+            self.params[i].bind_value(arg)
 
-        return self.body.run()
+        result = None
+        for expr in self.body:
+            result = expr.run()
+
+        return result
 
 class FunctionCall(object):
     def __init__(self, func, args):
         self.func = func
         self.args = args
-        self.val_type = self.func.body.val_type
+        self.val_type = self.func.body[-1].val_type
 
     def run(self):
         return self.func.call(self.args)
@@ -135,10 +139,8 @@ class Binding(object):
         return self
 
     def run(self):
-        unify(self.var.val_type, self.expr.val_type)
-
-        self.var.value = self.expr
-        return self.var.value.run()
+        self.var.bind_value(self.expr)
+        return self.var.run()
 
 class Expression(object):
     pass
@@ -161,21 +163,25 @@ class Variable(object):
     def __init__(self, name, negated=False):
         self.name = name
         self.val_type = TypeVariable()
-        self.value = None
+        self.value_node = None
         self.negated = negated
 
+    def bind_value(self, value_node):
+        self.value_node = value_node
+        unify(self.val_type, value_node.val_type)
+
     def unwrap(self):
-        if not self.value:
+        if not self.value_node:
             return self
 
-        return self.value
+        return self.value_node
 
     def run(self):
-        if not self.value:
+        if not self.value_node:
             raise Exception("Variable '" + self.name + "' unbound.")
 
         neg = -1.0 if self.negated else 1.0
-        return self.value.run() * neg
+        return self.value_node.run() * neg
 
 class BinaryOp(Expression):
     def __init__(self, op, lhs, rhs):
@@ -188,12 +194,21 @@ class BinaryOp(Expression):
         elif op in ['and', 'or', '<', '>', '<=', '>=', '==', '!=' ]:
             self.val_type = BoolType
 
+        # type to propagate (can be different from above)
+        if op in ['and', 'or']:
+            self.prop_val_type = BoolType
+        else:
+            self.prop_val_type = None
+
     def unwrap(self):
         self.lhs = self.lhs.unwrap()
         self.rhs = self.rhs.unwrap()
         return self
 
     def run(self):
+        if self.prop_val_type:
+            unify(self.prop_val_type, self.lhs.val_type)
+
         unify(self.lhs.val_type, self.rhs.val_type)
 
         if self.op == '*':
@@ -226,7 +241,7 @@ class BinaryOp(Expression):
 
 class Lexer(object):
     def __init__(self):
-        pass
+        self.reserved = ['def', 'end', 'if', 'else', 'elif']
 
     def feed_line(self, line):
         tokens = generate_tokens(BytesIO(line.encode('utf-8')).readline)
@@ -251,6 +266,7 @@ class Lexer(object):
             return
 
         self.token = self.next_token
+
         self.next_token = self.tokens.next() if self.peek_type() != tokenize.ENDMARKER else None
 
         # special case: want '->' to be treated as a single op
@@ -258,9 +274,15 @@ class Lexer(object):
             self.token = (self.token[0], '->')
             self.next_token = self.tokens.next()
 
+    def consume_whitespace(self):
+        while self.peek_type() in [tokenize.INDENT, tokenize.DEDENT, tokenize.NL, tokenize.NEWLINE]:
+            self.next()
+
     def consume_ident(self):
         if self.peek_type() == tokenize.NAME:
             ident = self.peek_val()
+            if ident in self.reserved:
+                return None
             self.next()
             return ident
         return None
@@ -365,8 +387,8 @@ class Parser(object):
 
     def parse_top_level_expression(self):
         expr = self.parse_expression()
-        if expr and not self.lexer.consume_expected(''):
-            raise Exception("Unexpected token: " + self.lexer.peek_val())
+        # if expr and not self.lexer.consume_expected(''):
+        #     raise Exception("Unexpected token: " + self.lexer.peek_val())
 
         return expr
 
@@ -414,11 +436,21 @@ class Parser(object):
             with Scope(self.binding_table) as table:
                 params = self.parse_param_list()
 
-                if not self.lexer.consume_expected('->'):
-                    raise Exception("Missing expected '->'.")
-
-                body = self.parse_top_level_expression()
-                func = Function(ident, params, body, table)
+                if self.lexer.consume_expected('->'):
+                    body = self.parse_top_level_expression()
+                    func = Function(ident, params, [body], table)
+                elif self.lexer.consume_expected(':'):
+                    body = []
+                    while not self.lexer.consume_expected('end'):
+                        self.lexer.consume_whitespace()
+                        expr = self.parse_binding()
+                        if not expr:
+                            raise Exception("Missing expected expression.")
+                        body.append(expr)
+                        self.lexer.consume_whitespace()
+                    func = Function(ident, params, body, table)
+                else:
+                    raise Exception("Missing expected start of function block ('->' or ':').")
 
             self.binding_table.insert(ident, func)
             return func
@@ -446,7 +478,17 @@ if __name__ == '__main__':
     last_bt = None
 
     while True:
-        line = raw_input('>>> ')
+        next_line = raw_input('>>> ')
+        line = ''
+        if next_line.endswith(':'):
+            line = next_line
+            while next_line != '':
+                next_line = raw_input('... ')
+                if next_line != '':
+                    line += '\n' + next_line
+        else:
+            line = next_line
+
         if line == 'exit' or line == 'exit()':
             break
         if line == 'bt()' and last_bt:

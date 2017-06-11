@@ -16,4 +16,17 @@ True
 42.0
 >>> x == true
 Type Mismatch: float != bool
+>>> def double(x):
+...    y = 2
+...    x * y
+... end
+>>> double(5)
+10.0
+>>> y = 3
+>>> def triple(x) -> x * y
+>>> triple(5)
+15.0
+>>> y = 2
+>>> triple(5)
+15.0
 ```
