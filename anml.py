@@ -58,9 +58,13 @@ class TypeVariable(object):
             if old_parent != None:
                 old_parent.parent = new_type
 
+class Unit:
+    pass
+
 IntType = TypeVariable(int)
 FloatType = TypeVariable(float)
 BoolType = TypeVariable(bool)
+UnitType = TypeVariable(Unit)
 
 class SymbolTable(object):
     def __init__(self):
@@ -97,7 +101,7 @@ class Function(object):
     def __init__(self, name, params, body, table):
         self.name = name
         self.params = params
-        # partial application: unwrap any bound variables
+        # capture closure: unwrap any bound variables
         self.body = [expr.unwrap() for expr in body]
         self.table = table
 
@@ -108,8 +112,6 @@ class Function(object):
         return len(self.params)
 
     def call(self, args):
-        assert(len(args) == len(self.params))
-
         for i, arg in enumerate(args):
             self.params[i].bind_value(arg)
 
@@ -121,6 +123,10 @@ class Function(object):
 
 class FunctionCall(object):
     def __init__(self, func, args):
+        arg_count = len(args)
+        param_count = len(func.params)
+        if arg_count != param_count:
+            raise Exception("Function '" + func.name + "' expecting " + str(param_count) + ' args, got ' + str(arg_count) + '.')
         self.func = func
         self.args = args
         self.val_type = self.func.body[-1].val_type
@@ -134,7 +140,7 @@ class Binding(object):
         self.expr = expr
 
     def unwrap(self):
-        # lexical scope: unwrap any bound variables
+        # capture closure: unwrap any bound variables
         self.expr = self.expr.unwrap()
         return self
 
@@ -182,6 +188,35 @@ class Variable(object):
 
         neg = -1.0 if self.negated else 1.0
         return self.value_node.run() * neg
+
+class IfElse(Expression):
+    def __init__(self, cond, true_body, false_body):
+        self.cond = cond
+        self.true_body = true_body
+        self.false_body = false_body
+        self.val_type = TypeVariable()
+
+    def unwrap(self):
+        self.cond = self.cond.unwrap()
+        self.true_body = [body.unwrap() for body in self.true_body]
+        self.false_body = [body.unwrap() for body in self.false_body]
+        return self
+
+    def run(self):
+        unify(BoolType, self.cond.val_type)
+        unify(self.val_type, self.true_body[-1].val_type)
+        unify(self.true_body[-1].val_type, self.false_body[-1].val_type)
+
+        if self.cond.run() == True:
+            result = None
+            for expr in self.true_body:
+                result = expr.run()
+            return result
+
+        result = None
+        for expr in self.false_body:
+            result = expr.run()
+        return result
 
 class BinaryOp(Expression):
     def __init__(self, op, lhs, rhs):
@@ -357,10 +392,10 @@ class Parser(object):
             return expr
         return None
 
-    def parse_primary_expression(self):
+    def parse_atom(self):
         return self.parse_number() or self.parse_bool() or self.parse_paren_expression() or self.parse_ident()
 
-    def parse_expression(self, precedence=0):
+    def parse_binary_expression(self, precedence=0):
         all_ops = [["or"],["and"],["<",">","==","!=",">=","<="],["+", "-"],["*", "/"], ["**"]]
         ops = all_ops[precedence]
         top_precedence = len(all_ops)-1
@@ -369,7 +404,7 @@ class Parser(object):
         if precedence < (len(all_ops)-1):
             lhs = self.parse_expression(precedence+1)
         else:
-            lhs = self.parse_primary_expression()
+            lhs = self.parse_atom()
 
         if lhs:
             bin_op = self.lexer.consume_op(ops)
@@ -385,12 +420,46 @@ class Parser(object):
             return lhs
         return None
 
-    def parse_top_level_expression(self):
-        expr = self.parse_expression()
-        # if expr and not self.lexer.consume_expected(''):
-        #     raise Exception("Unexpected token: " + self.lexer.peek_val())
+    def parse_expression(self, precedence=0):
+        return self.parse_if_else() or self.parse_binary_expression(precedence)
 
-        return expr
+    def parse_block(self, end_tokens):
+        is_block = False
+        if self.lexer.consume_expected('->'):
+            self.lexer.consume_whitespace()
+            body = [self.parse_expression()]
+            self.lexer.consume_whitespace()
+        elif self.lexer.consume_expected(':'):
+            is_block = True
+            body = []
+            while not any(self.lexer.peek_val(token) for token in end_tokens):
+                self.lexer.consume_whitespace()
+                expr = self.parse_binding()
+                if not expr:
+                    raise Exception("Missing expected expression.")
+                body.append(expr)
+                self.lexer.consume_whitespace()
+        else:
+            raise Exception("Missing expected start of block ('->' or ':').")
+
+        return body, is_block
+
+    def parse_if_else(self):
+        if self.lexer.consume_expected('if'):
+            cond = self.parse_expression()
+            true_body, is_block = self.parse_block(['end', 'else'])
+
+            if self.lexer.consume_expected('else'):
+                false_body, is_block = self.parse_block(['end'])
+            else:
+                false_body, _ = [Value(None, UnitType)]
+
+            if is_block and not self.lexer.consume_expected('end'):
+                raise Exception("Missing expected 'end'.")
+
+            return IfElse(cond, true_body, false_body)
+
+        return None
 
     def parse_param_list(self):
         if not self.lexer.consume_expected('('):
@@ -436,21 +505,12 @@ class Parser(object):
             with Scope(self.binding_table) as table:
                 params = self.parse_param_list()
 
-                if self.lexer.consume_expected('->'):
-                    body = self.parse_top_level_expression()
-                    func = Function(ident, params, [body], table)
-                elif self.lexer.consume_expected(':'):
-                    body = []
-                    while not self.lexer.consume_expected('end'):
-                        self.lexer.consume_whitespace()
-                        expr = self.parse_binding()
-                        if not expr:
-                            raise Exception("Missing expected expression.")
-                        body.append(expr)
-                        self.lexer.consume_whitespace()
-                    func = Function(ident, params, body, table)
-                else:
-                    raise Exception("Missing expected start of function block ('->' or ':').")
+                body, is_block = self.parse_block(['end'])
+
+                if is_block and not self.lexer.consume_expected('end'):
+                    raise Exception("Missing expected 'end'.")
+
+                func = Function(ident, params, body, table)
 
             self.binding_table.insert(ident, func)
             return func
@@ -464,7 +524,7 @@ class Parser(object):
             if type(lhs) != Variable:
                 raise Exception("Expected Variable on binding left hand side, got: " + type(lhs).__name__)
             self.binding_table.insert(lhs.name, lhs)
-            rhs = self.parse_top_level_expression()
+            rhs = self.parse_expression()
             return Binding(lhs, rhs)
 
         return lhs
@@ -480,7 +540,7 @@ if __name__ == '__main__':
     while True:
         next_line = raw_input('>>> ')
         line = ''
-        if next_line.endswith(':'):
+        if next_line.endswith(':') or next_line.endswith('->'):
             line = next_line
             while next_line != '':
                 next_line = raw_input('... ')
