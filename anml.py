@@ -63,6 +63,7 @@ class Unit:
 
 IntType = TypeVariable(int)
 FloatType = TypeVariable(float)
+StringType = TypeVariable(str)
 BoolType = TypeVariable(bool)
 UnitType = TypeVariable(Unit)
 
@@ -83,8 +84,8 @@ class SymbolTable(object):
                 return table[ident]
         return None
 
-    def insert(self, ident, node):
-        self.tables[-1][ident] = node
+    def insert(self, ident, node, offset=-1):
+        self.tables[offset][ident] = node
 
 # Scope simplifies pushing a new scope to symbol table
 class Scope(object):
@@ -98,12 +99,17 @@ class Scope(object):
         self.symbol_table.pop_table()
 
 class Function(object):
-    def __init__(self, name, params, body, table):
+    def __init__(self, name, params, table):
         self.name = name
         self.params = params
+        self.table = table
+        self.ret_type = TypeVariable()
+
+    # defer setting body to support recursive calls
+    def set_body(self, body):
         # capture closure: unwrap any bound variables
         self.body = [expr.unwrap() for expr in body]
-        self.table = table
+        unify(self.ret_type, self.body[-1].val_type)
 
     def run(self):
         return None
@@ -113,7 +119,8 @@ class Function(object):
 
     def call(self, args):
         for i, arg in enumerate(args):
-            self.params[i].bind_value(arg)
+            # call-by-value / eager evaluation
+            self.params[i].bind_value(Value(arg.run(), arg.val_type))
 
         result = None
         for expr in self.body:
@@ -129,7 +136,12 @@ class FunctionCall(object):
             raise Exception("Function '" + func.name + "' expecting " + str(param_count) + ' args, got ' + str(arg_count) + '.')
         self.func = func
         self.args = args
-        self.val_type = self.func.body[-1].val_type
+        self.val_type = self.func.ret_type
+
+    def unwrap(self):
+        self.args = [expr.unwrap() for expr in self.args]
+
+        return self
 
     def run(self):
         return self.func.call(self.args)
@@ -166,11 +178,10 @@ class Value(Expression):
         return str(self.value)
 
 class Variable(object):
-    def __init__(self, name, negated=False):
+    def __init__(self, name):
         self.name = name
         self.val_type = TypeVariable()
         self.value_node = None
-        self.negated = negated
 
     def bind_value(self, value_node):
         self.value_node = value_node
@@ -186,8 +197,7 @@ class Variable(object):
         if not self.value_node:
             raise Exception("Variable '" + self.name + "' unbound.")
 
-        neg = -1.0 if self.negated else 1.0
-        return self.value_node.run() * neg
+        return self.value_node.run()
 
 class IfElse(Expression):
     def __init__(self, cond, true_body, false_body):
@@ -225,15 +235,17 @@ class BinaryOp(Expression):
         self.rhs = rhs
 
         if op in ['+', '-', '*', '/', '**']:
-            self.val_type = FloatType
+            self.val_type = TypeVariable()
+            self.inherit_child_type = True
         elif op in ['and', 'or', '<', '>', '<=', '>=', '==', '!=' ]:
             self.val_type = BoolType
+            self.inherit_child_type = False
 
-        # type to propagate (can be different from above)
+        # type to propagate to children (can be different from above)
         if op in ['and', 'or']:
             self.prop_val_type = BoolType
         else:
-            self.prop_val_type = None
+            self.prop_val_type = TypeVariable()
 
     def unwrap(self):
         self.lhs = self.lhs.unwrap()
@@ -241,8 +253,11 @@ class BinaryOp(Expression):
         return self
 
     def run(self):
-        if self.prop_val_type:
+        if self.prop_val_type != None:
             unify(self.prop_val_type, self.lhs.val_type)
+
+        if self.inherit_child_type:
+            unify(self.val_type, self.lhs.val_type)
 
         unify(self.lhs.val_type, self.rhs.val_type)
 
@@ -301,7 +316,6 @@ class Lexer(object):
             return
 
         self.token = self.next_token
-
         self.next_token = self.tokens.next() if self.peek_type() != tokenize.ENDMARKER else None
 
         # special case: want '->' to be treated as a single op
@@ -322,11 +336,18 @@ class Lexer(object):
             return ident
         return None
 
-    def consume_value(self):
+    def consume_number(self):
         if self.peek_type() == tokenize.NUMBER:
             value = self.peek_val()
             self.next()
             return value
+        return None
+
+    def consume_string(self):
+        if self.peek_type() == tokenize.STRING:
+            string = self.peek_val()
+            self.next()
+            return string
         return None
 
     def consume_op(self, ops):
@@ -347,12 +368,21 @@ class Parser(object):
         self.lexer = lexer
         self.binding_table = SymbolTable()
 
+    def parse_string(self):
+        string = self.lexer.consume_string()
+        if string != None:
+            return Value(string, StringType)
+        return None
+
     def parse_number(self):
         is_neg = self.lexer.consume_expected('-')
-        val = self.lexer.consume_value()
+        val = self.lexer.consume_number()
         if val != None:
             neg = '-' if is_neg else ''
-            return Value(float(neg + val), FloatType)
+            if '.' in val:
+                return Value(float(neg + val), FloatType)
+            else:
+                return Value(int(neg + val), IntType)
         return None
 
     def parse_bool(self):
@@ -372,7 +402,7 @@ class Parser(object):
 
         var = self.binding_table.get(name)
         if var == None:
-            var = Variable(name, is_neg)
+            var = Variable(name)
             self.binding_table.insert(name, var)
 
         # is this a function call?
@@ -393,7 +423,7 @@ class Parser(object):
         return None
 
     def parse_atom(self):
-        return self.parse_number() or self.parse_bool() or self.parse_paren_expression() or self.parse_ident()
+        return self.parse_number() or self.parse_bool() or self.parse_string() or self.parse_paren_expression() or self.parse_ident()
 
     def parse_binary_expression(self, precedence=0):
         all_ops = [["or"],["and"],["<",">","==","!=",">=","<="],["+", "-"],["*", "/"], ["**"]]
@@ -452,7 +482,7 @@ class Parser(object):
             if self.lexer.consume_expected('else'):
                 false_body, is_block = self.parse_block(['end'])
             else:
-                false_body, _ = [Value(None, UnitType)]
+                false_body = [Value(None, UnitType)]
 
             if is_block and not self.lexer.consume_expected('end'):
                 raise Exception("Missing expected 'end'.")
@@ -505,14 +535,17 @@ class Parser(object):
             with Scope(self.binding_table) as table:
                 params = self.parse_param_list()
 
+                # insert symbol before parsing body to support recursive calls
+                func = Function(ident, params, table)
+                self.binding_table.insert(ident, func, -2)
+
                 body, is_block = self.parse_block(['end'])
 
                 if is_block and not self.lexer.consume_expected('end'):
                     raise Exception("Missing expected 'end'.")
 
-                func = Function(ident, params, body, table)
+                func.set_body(body)
 
-            self.binding_table.insert(ident, func)
             return func
 
         return None
@@ -525,6 +558,8 @@ class Parser(object):
                 raise Exception("Expected Variable on binding left hand side, got: " + type(lhs).__name__)
             self.binding_table.insert(lhs.name, lhs)
             rhs = self.parse_expression()
+            if rhs == None:
+                raise Exception("Expected expression on right hand side, got: " + type(rhs).__name__)
             return Binding(lhs, rhs)
 
         return lhs
