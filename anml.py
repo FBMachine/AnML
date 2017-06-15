@@ -4,6 +4,20 @@ from io import BytesIO
 from random import random as rand
 import sys, traceback
 
+class TypeNameGenerator:
+    type_names = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    type_count = 0
+
+    def reset(self):
+        self.type_count = 0
+
+    def new_type_name(self):
+        type_name = self.type_names[self.type_count]
+        self.type_count += 1
+        return type_name
+
+type_name_gen = TypeNameGenerator()
+
 # union-find for unifying types during type inference
 def unify(lhs, rhs):
     # find root for each type variable
@@ -37,6 +51,17 @@ class TypeVariable(object):
     def __init__(self, concrete_type=None):
         self.concrete_type = concrete_type
         self.parent = None
+        self.type_name = ''
+
+    def get_name(self):
+        type_node = self.get_type()
+        if type_node.concrete_type != None:
+            return type_node.concrete_type.__name__
+        elif type_node.type_name != '':
+            return type_node.type_name
+        else:
+            type_node.type_name = type_name_gen.new_type_name()
+            return type_node.type_name
 
     def get_type(self):
         type_node = self
@@ -98,6 +123,9 @@ class Scope(object):
     def __exit__(self, type, value, bt):
         self.symbol_table.pop_table()
 
+# TODO: remove once type printing is fixed
+SHOWED_TYPE_WARNING = False
+
 class Function(object):
     def __init__(self, name, params, table):
         self.name = name
@@ -112,7 +140,16 @@ class Function(object):
         unify(self.ret_type, self.body[-1].val_type)
 
     def run(self):
-        return None
+        type_name_gen.reset()
+        # TODO: These types won't be valid until type inference is split into
+        #       a separate phase. They currently will appear to be independent.
+        fn_sig = '(' + ', '.join([param.val_type.get_name() for param in self.params])
+        fn_sig += ') -> ' + self.ret_type.get_name()
+        global SHOWED_TYPE_WARNING
+        if not SHOWED_TYPE_WARNING:
+            print "Note: function type printing currently broken."
+            SHOWED_TYPE_WARNING = True
+        return "def " + self.name + ' : ' + fn_sig + ' = <Function>'
 
     def arity(self):
         return len(self.params)
@@ -150,6 +187,7 @@ class Binding(object):
     def __init__(self, var, expr):
         self.var = var
         self.expr = expr
+        self.val_type = UnitType
 
     def unwrap(self):
         # capture closure: unwrap any bound variables
@@ -158,7 +196,8 @@ class Binding(object):
 
     def run(self):
         self.var.bind_value(self.expr)
-        return self.var.run()
+        result = str(self.var.run())
+        return self.var.name + ' : ' + self.var.val_type.get_name() + ' = ' + result
 
 class Expression(object):
     pass
@@ -180,11 +219,12 @@ class Value(Expression):
 class Variable(object):
     def __init__(self, name):
         self.name = name
-        self.val_type = TypeVariable()
         self.value_node = None
+        self.val_type = TypeVariable()
 
     def bind_value(self, value_node):
         self.value_node = value_node
+        self.val_type = TypeVariable()
         unify(self.val_type, value_node.val_type)
 
     def unwrap(self):
@@ -291,7 +331,7 @@ class BinaryOp(Expression):
 
 class Lexer(object):
     def __init__(self):
-        self.reserved = ['def', 'end', 'if', 'else', 'elif']
+        self.reserved = ['def', 'end', 'if', 'else', 'elif', 'return']
 
     def feed_line(self, line):
         tokens = generate_tokens(BytesIO(line.encode('utf-8')).readline)
@@ -453,7 +493,7 @@ class Parser(object):
     def parse_expression(self, precedence=0):
         return self.parse_if_else() or self.parse_binary_expression(precedence)
 
-    def parse_block(self, end_tokens):
+    def parse_block(self, end_tokens, allow_return=False):
         is_block = False
         if self.lexer.consume_expected('->'):
             self.lexer.consume_whitespace()
@@ -462,13 +502,18 @@ class Parser(object):
         elif self.lexer.consume_expected(':'):
             is_block = True
             body = []
-            while not any(self.lexer.peek_val(token) for token in end_tokens):
+            while not any(self.lexer.peek_val() == token for token in end_tokens):
                 self.lexer.consume_whitespace()
+                last_expr = self.lexer.consume_expected('return')
+                if last_expr and not allow_return:
+                    raise Exception("Unexpected 'return' from non-function scope.")
                 expr = self.parse_binding()
                 if not expr:
                     raise Exception("Missing expected expression.")
                 body.append(expr)
                 self.lexer.consume_whitespace()
+                if last_expr:
+                    break
         else:
             raise Exception("Missing expected start of block ('->' or ':').")
 
@@ -477,15 +522,17 @@ class Parser(object):
     def parse_if_else(self):
         if self.lexer.consume_expected('if'):
             cond = self.parse_expression()
-            true_body, is_block = self.parse_block(['end', 'else'])
 
-            if self.lexer.consume_expected('else'):
-                false_body, is_block = self.parse_block(['end'])
-            else:
-                false_body = [Value(None, UnitType)]
+            with Scope(self.binding_table) as table:
+                true_body, is_block = self.parse_block(['end', 'else'])
 
-            if is_block and not self.lexer.consume_expected('end'):
-                raise Exception("Missing expected 'end'.")
+                if self.lexer.consume_expected('else'):
+                    false_body, is_block = self.parse_block(['end'])
+                else:
+                    false_body = [Value(None, UnitType)]
+
+                if is_block and not self.lexer.consume_expected('end'):
+                    raise Exception("Missing expected 'end'.")
 
             return IfElse(cond, true_body, false_body)
 
@@ -539,10 +586,10 @@ class Parser(object):
                 func = Function(ident, params, table)
                 self.binding_table.insert(ident, func, -2)
 
-                body, is_block = self.parse_block(['end'])
+                body, is_block = self.parse_block(['end'], True)
 
-                if is_block and not self.lexer.consume_expected('end'):
-                    raise Exception("Missing expected 'end'.")
+                # if is_block and not self.lexer.consume_expected('end'):
+                #     raise Exception("Missing expected 'end'.")
 
                 func.set_body(body)
 
