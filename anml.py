@@ -14,6 +14,7 @@ class TypeNameGenerator:
     def new_type_name(self):
         type_name = self.type_names[self.type_count]
         self.type_count += 1
+        self.type_count %= len(self.type_names)
         return type_name
 
 type_name_gen = TypeNameGenerator()
@@ -36,16 +37,16 @@ def unify(lhs, rhs):
 
     # if one variable has concrete type, set it as root
     if rhs_type.concrete_type != None:
-        lhs.set_type(rhs_type)
+        lhs_type.set_type(rhs_type)
     elif lhs_type.concrete_type != None:
-        rhs.set_type(lhs_type)
+        rhs_type.set_type(lhs_type)
     else:
         # TODO: use rank to choose order instead
         # flip coin to choose parent to create a more balanced tree
         if rand() >= 0.5:
-            lhs.set_type(rhs_type)
+            lhs_type.set_type(rhs_type)
         else:
-            rhs.set_type(lhs_type)
+            rhs_type.set_type(lhs_type)
 
 class TypeVariable(object):
     def __init__(self, concrete_type=None):
@@ -123,21 +124,37 @@ class Scope(object):
     def __exit__(self, type, value, bt):
         self.symbol_table.pop_table()
 
-# TODO: remove once type printing is fixed
-SHOWED_TYPE_WARNING = False
-
 class Function(object):
     def __init__(self, name, params, table):
         self.name = name
         self.params = params
         self.table = table
         self.ret_type = TypeVariable()
+        self.val_type = self.ret_type
+        self.inferring_types = False
 
     # defer setting body to support recursive calls
     def set_body(self, body):
         # capture closure: unwrap any bound variables
         self.body = [expr.unwrap() for expr in body]
+
+    def infer_types(self, args=[]):
+        # recurrent function guard: we're already inferring types in body
+        if self.inferring_types:
+            return
+
+        self.inferring_types = True
+
+        for i, arg in enumerate(args):
+            unify(self.params[i].val_type, args[i].val_type)
+
+        # unify return value first in case of recursive call
         unify(self.ret_type, self.body[-1].val_type)
+
+        for expr in self.body:
+            expr.infer_types()
+
+        self.inferring_types = False
 
     def run(self):
         type_name_gen.reset()
@@ -145,10 +162,6 @@ class Function(object):
         #       a separate phase. They currently will appear to be independent.
         fn_sig = '(' + ', '.join([param.val_type.get_name() for param in self.params])
         fn_sig += ') -> ' + self.ret_type.get_name()
-        global SHOWED_TYPE_WARNING
-        if not SHOWED_TYPE_WARNING:
-            print "Note: function type printing currently broken."
-            SHOWED_TYPE_WARNING = True
         return "def " + self.name + ' : ' + fn_sig + ' = <Function>'
 
     def arity(self):
@@ -175,6 +188,9 @@ class FunctionCall(object):
         self.args = args
         self.val_type = self.func.ret_type
 
+    def infer_types(self):
+        self.func.infer_types(self.args)
+
     def unwrap(self):
         self.args = [expr.unwrap() for expr in self.args]
 
@@ -189,13 +205,17 @@ class Binding(object):
         self.expr = expr
         self.val_type = UnitType
 
+    def infer_types(self):
+        self.expr.infer_types()
+        self.var.bind_value(self.expr)
+        self.var.infer_types()
+
     def unwrap(self):
         # capture closure: unwrap any bound variables
         self.expr = self.expr.unwrap()
         return self
 
     def run(self):
-        self.var.bind_value(self.expr)
         result = str(self.var.run())
         return self.var.name + ' : ' + self.var.val_type.get_name() + ' = ' + result
 
@@ -207,11 +227,14 @@ class Value(Expression):
         self.value = value
         self.val_type = val_type
 
-    def run(self):
-        return self.value
+    def infer_types(self):
+        pass
 
     def unwrap(self):
         return self
+
+    def run(self):
+        return self.value
 
     def __str__(self):
         return str(self.value)
@@ -222,10 +245,13 @@ class Variable(object):
         self.value_node = None
         self.val_type = TypeVariable()
 
+    def infer_types(self):
+        if self.value_node:
+            unify(self.val_type, self.value_node.val_type)
+
     def bind_value(self, value_node):
         self.value_node = value_node
         self.val_type = TypeVariable()
-        unify(self.val_type, value_node.val_type)
 
     def unwrap(self):
         if not self.value_node:
@@ -246,6 +272,18 @@ class IfElse(Expression):
         self.false_body = false_body
         self.val_type = TypeVariable()
 
+    def infer_types(self):
+        self.cond.infer_types()
+        unify(BoolType, self.cond.val_type)
+        unify(self.val_type, self.true_body[-1].val_type)
+        unify(self.true_body[-1].val_type, self.false_body[-1].val_type)
+
+        for expr in self.true_body:
+            expr.infer_types()
+
+        for expr in self.false_body:
+            expr.infer_types()
+
     def unwrap(self):
         self.cond = self.cond.unwrap()
         self.true_body = [body.unwrap() for body in self.true_body]
@@ -253,10 +291,6 @@ class IfElse(Expression):
         return self
 
     def run(self):
-        unify(BoolType, self.cond.val_type)
-        unify(self.val_type, self.true_body[-1].val_type)
-        unify(self.true_body[-1].val_type, self.false_body[-1].val_type)
-
         if self.cond.run() == True:
             result = None
             for expr in self.true_body:
@@ -285,7 +319,19 @@ class BinaryOp(Expression):
         if op in ['and', 'or']:
             self.prop_val_type = BoolType
         else:
-            self.prop_val_type = TypeVariable()
+            self.prop_val_type = None
+
+    def infer_types(self):
+        if self.prop_val_type != None:
+            unify(self.prop_val_type, self.lhs.val_type)
+
+        self.lhs.infer_types()
+        self.rhs.infer_types()
+
+        unify(self.lhs.val_type, self.rhs.val_type)
+
+        if self.inherit_child_type:
+            unify(self.val_type, self.lhs.val_type)
 
     def unwrap(self):
         self.lhs = self.lhs.unwrap()
@@ -293,14 +339,6 @@ class BinaryOp(Expression):
         return self
 
     def run(self):
-        if self.prop_val_type != None:
-            unify(self.prop_val_type, self.lhs.val_type)
-
-        if self.inherit_child_type:
-            unify(self.val_type, self.lhs.val_type)
-
-        unify(self.lhs.val_type, self.rhs.val_type)
-
         if self.op == '*':
             return self.lhs.run() * self.rhs.run()
         elif self.op == '/':
@@ -509,7 +547,10 @@ class Parser(object):
                     raise Exception("Unexpected 'return' from non-function scope.")
                 expr = self.parse_binding()
                 if not expr:
-                    raise Exception("Missing expected expression.")
+                    if last_expr and allow_return:
+                        expr = Value(None, UnitType)
+                    else:
+                        raise Exception("Missing expected expression.")
                 body.append(expr)
                 self.lexer.consume_whitespace()
                 if last_expr:
@@ -645,6 +686,7 @@ if __name__ == '__main__':
                 done = True
                 expr = parser.parse_top_level()
                 if expr:
+                    expr.infer_types()
                     result = expr.run()
                     if result != None:
                         print str(result)

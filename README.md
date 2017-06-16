@@ -38,7 +38,7 @@ def double : (int) -> int = <Function>
       if e == 0 -> 1
       else -> x * pow(x, e - 1)
 
-def pow : (a, b) -> c = <Function>
+def pow : (int, int) -> int = <Function>
 >>> pow(2, 32)
 4294967296
 
@@ -46,7 +46,7 @@ def pow : (a, b) -> c = <Function>
 >>> y = 3
 y : int = 3
 >>> def triple(x) -> x * y
-def triple : (a) -> a = <Function>
+def triple : (int) -> int = <Function>
 >>> triple(5)
 15
 
