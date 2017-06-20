@@ -133,6 +133,9 @@ class Function(object):
         self.val_type = self.ret_type
         self.inferring_types = False
 
+        for param in self.params:
+            param.undefined = False
+
     # defer setting body to support recursive calls
     def set_body(self, body):
         # capture closure: unwrap any bound variables
@@ -145,8 +148,15 @@ class Function(object):
 
         self.inferring_types = True
 
-        for i, arg in enumerate(args):
-            unify(self.params[i].val_type, args[i].val_type)
+        if args:
+            arg_count = len(args)
+            param_count = len(self.params)
+            if arg_count != param_count:
+                raise Exception("error: Function '" + self.name + "' expecting " + str(param_count) + ' args, got ' + str(arg_count) + '.')
+
+            for i, arg in enumerate(args):
+                unify(self.params[i].val_type, args[i].val_type)
+
 
         # unify return value first in case of recursive call
         unify(self.ret_type, self.body[-1].val_type)
@@ -156,13 +166,16 @@ class Function(object):
 
         self.inferring_types = False
 
-    def run(self):
+    def __str__(self):
         type_name_gen.reset()
         # TODO: These types won't be valid until type inference is split into
         #       a separate phase. They currently will appear to be independent.
         fn_sig = '(' + ', '.join([param.val_type.get_name() for param in self.params])
         fn_sig += ') -> ' + self.ret_type.get_name()
         return "def " + self.name + ' : ' + fn_sig + ' = <Function>'
+
+    def run(self):
+        return self
 
     def arity(self):
         return len(self.params)
@@ -180,10 +193,6 @@ class Function(object):
 
 class FunctionCall(object):
     def __init__(self, func, args):
-        arg_count = len(args)
-        param_count = len(func.params)
-        if arg_count != param_count:
-            raise Exception("Function '" + func.name + "' expecting " + str(param_count) + ' args, got ' + str(arg_count) + '.')
         self.func = func
         self.args = args
         self.val_type = self.func.ret_type
@@ -244,14 +253,19 @@ class Variable(object):
         self.name = name
         self.value_node = None
         self.val_type = TypeVariable()
+        # this is cleared when appearing in lhs of binding or as a parameter
+        self.undefined = True
 
     def infer_types(self):
         if self.value_node:
             unify(self.val_type, self.value_node.val_type)
+        elif self.undefined:
+            raise Exception("error: Variable '" + self.name + "' undefined.")
 
     def bind_value(self, value_node):
         self.value_node = value_node
         self.val_type = TypeVariable()
+        self.undefined = False
 
     def unwrap(self):
         if not self.value_node:
@@ -261,7 +275,7 @@ class Variable(object):
 
     def run(self):
         if not self.value_node:
-            raise Exception("Variable '" + self.name + "' unbound.")
+            raise Exception("error: Variable '" + self.name + "' unbound.")
 
         return self.value_node.run()
 
@@ -370,8 +384,9 @@ class BinaryOp(Expression):
 class Lexer(object):
     def __init__(self):
         self.reserved = ['def', 'end', 'if', 'else', 'elif', 'return']
+        self.line_num = 0
 
-    def feed_line(self, line):
+    def feed_input(self, line):
         tokens = generate_tokens(BytesIO(line.encode('utf-8')).readline)
 
         self.tokens = tokens
@@ -401,8 +416,11 @@ class Lexer(object):
             self.token = (self.token[0], '->')
             self.next_token = self.tokens.next()
 
+        if self.peek_type() in [tokenize.NL, tokenize.NEWLINE]:
+            self.line_num += 1
+
     def consume_whitespace(self):
-        while self.peek_type() in [tokenize.INDENT, tokenize.DEDENT, tokenize.NL, tokenize.NEWLINE]:
+        while self.peek_type() in [tokenize.INDENT, tokenize.DEDENT, tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT]:
             self.next()
 
     def consume_ident(self):
@@ -486,6 +504,11 @@ class Parser(object):
         # is this a function call?
         args = self.parse_arg_list()
         if args:
+            while type(var) == Variable:
+                var = var.unwrap()
+
+            if not isinstance(var, Function):
+                raise Exception("Type Mismatch: " + type(var).__name__ + ' != Function.')
             return FunctionCall(var, args)
 
         return var
@@ -494,9 +517,9 @@ class Parser(object):
         if self.lexer.consume_expected('('):
             expr = self.parse_expression()
             if not expr:
-                raise Exception("Missing expected expression.")
+                raise Exception("error: Missing expected expression.")
             if not self.lexer.consume_expected(')'):
-                raise Exception("Missing closing ')'.")
+                raise Exception("error: Missing closing ')'.")
             return expr
         return None
 
@@ -522,7 +545,7 @@ class Parser(object):
                 #  from right to left
                 rhs = self.parse_expression(min(top_precedence, precedence+1))
                 if not rhs:
-                    raise Exception("Missing expected expression.")
+                    raise Exception("error: Missing expected expression.")
                 lhs = BinaryOp(bin_op, lhs, rhs)
                 bin_op = self.lexer.consume_op(ops)
             return lhs
@@ -544,19 +567,19 @@ class Parser(object):
                 self.lexer.consume_whitespace()
                 last_expr = self.lexer.consume_expected('return')
                 if last_expr and not allow_return:
-                    raise Exception("Unexpected 'return' from non-function scope.")
+                    raise Exception("error: Unexpected 'return' from non-function scope.")
                 expr = self.parse_binding()
                 if not expr:
                     if last_expr and allow_return:
                         expr = Value(None, UnitType)
                     else:
-                        raise Exception("Missing expected expression.")
+                        raise Exception("error: Missing expected expression.")
                 body.append(expr)
                 self.lexer.consume_whitespace()
                 if last_expr:
                     break
         else:
-            raise Exception("Missing expected start of block ('->' or ':').")
+            raise Exception("error: Missing expected start of block ('->' or ':').")
 
         return body, is_block
 
@@ -573,7 +596,7 @@ class Parser(object):
                     false_body = [Value(None, UnitType)]
 
                 if is_block and not self.lexer.consume_expected('end'):
-                    raise Exception("Missing expected 'end'.")
+                    raise Exception("error: Missing expected 'end'.")
 
             return IfElse(cond, true_body, false_body)
 
@@ -595,7 +618,7 @@ class Parser(object):
                 break
 
         if not self.lexer.consume_expected(')'):
-            raise Exception("Missing expected ')'.")
+            raise Exception("error: Missing expected ')'.")
 
         return params
 
@@ -613,7 +636,7 @@ class Parser(object):
                 break
 
         if not self.lexer.consume_expected(')'):
-            raise Exception("Missing expected ')'.")
+            raise Exception("error: Missing expected ')'.")
 
         return args
 
@@ -643,19 +666,20 @@ class Parser(object):
 
         if self.lexer.consume_expected('='):
             if type(lhs) != Variable:
-                raise Exception("Expected Variable on binding left hand side, got: " + type(lhs).__name__)
+                raise Exception("error: Expected Variable on binding left hand side, got: " + type(lhs).__name__)
             self.binding_table.insert(lhs.name, lhs)
             rhs = self.parse_expression()
             if rhs == None:
-                raise Exception("Expected expression on right hand side, got: " + type(rhs).__name__)
+                raise Exception("error: Expected expression on right hand side, got: " + type(rhs).__name__)
             return Binding(lhs, rhs)
 
         return lhs
 
     def parse_top_level(self):
+        self.lexer.consume_whitespace()
         return self.parse_def() or self.parse_binding()
 
-if __name__ == '__main__':
+def REPL():
     lexer = Lexer()
     parser = Parser(lexer)
     last_bt = None
@@ -678,7 +702,7 @@ if __name__ == '__main__':
             traceback.print_tb(last_bt)
             continue
 
-        lexer.feed_line(line)
+        lexer.feed_input(line)
 
         done = False
         try:
@@ -696,3 +720,46 @@ if __name__ == '__main__':
             print ex
             exc_type, exc_value, exc_traceback = sys.exc_info()
             last_bt = exc_traceback
+
+def eval_file(filename):
+    lexer = Lexer()
+    parser = Parser(lexer)
+    program = []
+    error_count = 0
+
+    with open(filename, 'r') as infile:
+        print "Compiling " + filename + '...'
+        lines = infile.read()
+        lexer.feed_input(lines)
+
+        done = False
+        while not done:
+            try:
+                done = True
+                expr = parser.parse_top_level()
+                if expr:
+                    expr.infer_types()
+                    program.append(expr)
+                    done = False
+                    continue
+            except Exception as ex:
+                print filename + '(' + str(lexer.line_num) + '): ' + str(ex)
+                error_count += 1
+                done = False
+                # exc_type, exc_value, exc_traceback = sys.exc_info()
+                # traceback.print_tb(exc_traceback)
+
+        if error_count > 0:
+            print '\nCompilation failed with ' + str(error_count) + ' error(s).'
+            exit(-1)
+
+        for expr in program:
+            result = expr.run()
+            if result != None:
+                print str(result)
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        REPL()
+    else:
+        eval_file(sys.argv[1])
