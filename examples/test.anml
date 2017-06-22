@@ -1,0 +1,55 @@
+# Unit tests
+
+def test(passed, num_passed) -> if passed -> num_passed + 1 else -> num_passed
+
+x = if 1 > 0 -> -1
+    else -> 1
+
+num_passed = 0
+num_passed = test(x == -1, num_passed)
+
+def sqr(x) -> x * x
+num_passed = test(sqr(5) == 25, num_passed)
+
+def triple(x):
+  z = "test"
+  y = 3
+  return x * y
+
+num_passed = test(triple(6) == 18, num_passed)
+
+f = triple
+num_passed = test(f(12) == 36, num_passed)
+
+def pow(x, e) ->
+  if e == 0 -> 1
+  else -> x * pow(x, e - 1)
+
+num_passed = test(pow(2,8) == 256, num_passed)
+
+def pow(x, e):
+  return if e == 0 -> 1
+         else -> x * pow(x, e - 1)
+
+num_passed = test(pow(5,2) == 25, num_passed)
+
+y = 2
+def double(x) -> x * y
+num_passed = test(double(15) == 30, num_passed)
+
+y = 3
+num_passed = test(double(15) == 30, num_passed)
+
+if num_passed == 8 -> "All tests passed."
+else -> "FAILED."
+
+# def outer(x):
+#     def inner(y) -> x * y
+#
+#     return inner(2)
+#
+# outer(5)
+
+# def pow(x, e) ->
+#   | pow(_, 0) -> 1
+#   | _ -> x * pow(x, e - 1)

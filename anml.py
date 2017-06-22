@@ -19,6 +19,36 @@ class TypeNameGenerator:
 
 type_name_gen = TypeNameGenerator()
 
+def complex_types_match(lhs, rhs):
+    if type(lhs) != list or type(rhs) != list:
+        return lhs == rhs
+
+    if len(lhs) != len(rhs):
+        return False
+
+    for i in xrange(len(lhs)):
+        if type(lhs[i]) == str:
+            if lhs[i] != rhs[i]:
+                return False
+            continue
+        lhs_type = lhs[i].get_type()
+        rhs_type = rhs[i].get_type()
+        if lhs_type.concrete_type != rhs_type.concrete_type:
+            return False
+    return True
+
+def unify_complex_types(lhs, rhs):
+    if type(lhs) != list or type(rhs) != list:
+        return
+
+    if len(lhs) != len(rhs):
+        raise Exception("error: Attempting to unify types of different length.")
+
+    for i in xrange(len(lhs)):
+        if type(lhs[i]) == str:
+            continue
+        unify(lhs[i], rhs[i])
+
 # union-find for unifying types during type inference
 def unify(lhs, rhs):
     # find root for each type variable
@@ -28,11 +58,13 @@ def unify(lhs, rhs):
     if rhs_type == lhs_type:
         return
 
+    unify_complex_types(lhs_type.concrete_type, rhs_type.concrete_type)
+
     # check for type mismatch
     both_typed = lhs_type.concrete_type != None and rhs_type.concrete_type != None
-    mismatch = lhs_type.concrete_type != rhs_type.concrete_type
+    mismatch = not complex_types_match(lhs_type.concrete_type, rhs_type.concrete_type)
     if both_typed and mismatch:
-        mismatch_str = lhs_type.concrete_type.__name__ + " != " + rhs_type.concrete_type.__name__
+        mismatch_str = lhs_type.get_name() + " != " + rhs_type.get_name()
         raise Exception("Type Mismatch: " + mismatch_str)
 
     # if one variable has concrete type, set it as root
@@ -56,7 +88,19 @@ class TypeVariable(object):
 
     def get_name(self):
         type_node = self.get_type()
-        if type_node.concrete_type != None:
+        if type(type_node.concrete_type) == list:
+            name = ''
+            for t in type_node.concrete_type:
+                if hasattr(t, '__name__'):
+                    name += t.__name__
+                elif hasattr(t, 'get_name'):
+                    name += t.get_name()
+                elif type(t) == str:
+                    name += t
+                else:
+                    raise Exception('Internal Error')
+            return name
+        elif type_node.concrete_type != None:
             return type_node.concrete_type.__name__
         elif type_node.type_name != '':
             return type_node.type_name
@@ -92,6 +136,19 @@ FloatType = TypeVariable(float)
 StringType = TypeVariable(str)
 BoolType = TypeVariable(bool)
 UnitType = TypeVariable(Unit)
+
+def build_function_type(params):
+    ret_type = TypeVariable()
+    type_obj = ['(']
+    for param in params:
+        if len(type_obj) > 1:
+            type_obj.append(', ')
+        type_obj.append(param.val_type)
+    type_obj += [')', ' -> ']
+    type_obj.append(ret_type)
+    func_type = TypeVariable(type_obj)
+
+    return func_type, ret_type
 
 class SymbolTable(object):
     def __init__(self):
@@ -129,8 +186,7 @@ class Function(object):
         self.name = name
         self.params = params
         self.table = table
-        self.ret_type = TypeVariable()
-        self.val_type = self.ret_type
+        self.val_type, self.ret_type = build_function_type(params)
         self.inferring_types = False
 
         for param in self.params:
@@ -155,8 +211,7 @@ class Function(object):
                 raise Exception("error: Function '" + self.name + "' expecting " + str(param_count) + ' args, got ' + str(arg_count) + '.')
 
             for i, arg in enumerate(args):
-                unify(self.params[i].val_type, args[i].val_type)
-
+                unify(self.params[i].val_type, arg.val_type)
 
         # unify return value first in case of recursive call
         unify(self.ret_type, self.body[-1].val_type)
@@ -170,11 +225,9 @@ class Function(object):
         type_name_gen.reset()
         # TODO: These types won't be valid until type inference is split into
         #       a separate phase. They currently will appear to be independent.
-        fn_sig = '(' + ', '.join([param.val_type.get_name() for param in self.params])
-        fn_sig += ') -> ' + self.ret_type.get_name()
-        return "def " + self.name + ' : ' + fn_sig + ' = <Function>'
+        return "def " + self.name + ' : ' + self.val_type.get_name() + ' = <Function>'
 
-    def run(self):
+    def eval(self):
         return self
 
     def arity(self):
@@ -183,30 +236,50 @@ class Function(object):
     def call(self, args):
         for i, arg in enumerate(args):
             # call-by-value / eager evaluation
-            self.params[i].bind_value(Value(arg.run(), arg.val_type))
+            result = arg.eval()
+            if type(result) == Function:
+                self.params[i].bind_value(arg.unwrap())
+            else:
+                self.params[i].bind_value(Value(result, arg.val_type))
 
         result = None
         for expr in self.body:
-            result = expr.run()
+            result = expr.eval()
 
         return result
 
 class FunctionCall(object):
-    def __init__(self, func, args):
-        self.func = func
+    def __init__(self, var, args, func_type, ret_type):
+        self.var = var
         self.args = args
-        self.val_type = self.func.ret_type
+        self.val_type = ret_type
+        self.func_type = func_type
+
+    def get_function(self):
+        func = self.var.unwrap() if type(self.var) == Variable else self.var
+        prev_var = self.var
+        while func != prev_var and type(func) == Variable:
+            prev_var = func
+            func = func.unwrap()
+
+        return func if type(func) == Function else None
 
     def infer_types(self):
-        self.func.infer_types(self.args)
+        unify(self.var.val_type, self.func_type)
+        func = self.get_function()
+
+        if func != None:
+            unify(self.val_type, func.ret_type)
+            func.infer_types(self.args)
 
     def unwrap(self):
         self.args = [expr.unwrap() for expr in self.args]
 
         return self
 
-    def run(self):
-        return self.func.call(self.args)
+    def eval(self):
+        func = self.get_function()
+        return func.call(self.args)
 
 class Binding(object):
     def __init__(self, var, expr):
@@ -224,8 +297,8 @@ class Binding(object):
         self.expr = self.expr.unwrap()
         return self
 
-    def run(self):
-        result = str(self.var.run())
+    def eval(self):
+        result = str(self.var.eval())
         return self.var.name + ' : ' + self.var.val_type.get_name() + ' = ' + result
 
 class Expression(object):
@@ -242,7 +315,7 @@ class Value(Expression):
     def unwrap(self):
         return self
 
-    def run(self):
+    def eval(self):
         return self.value
 
     def __str__(self):
@@ -256,16 +329,15 @@ class Variable(object):
         # this is cleared when appearing in lhs of binding or as a parameter
         self.undefined = True
 
+    def bind_value(self, value_node):
+        self.value_node = value_node
+        self.undefined = False
+
     def infer_types(self):
         if self.value_node:
             unify(self.val_type, self.value_node.val_type)
         elif self.undefined:
             raise Exception("error: Variable '" + self.name + "' undefined.")
-
-    def bind_value(self, value_node):
-        self.value_node = value_node
-        self.val_type = TypeVariable()
-        self.undefined = False
 
     def unwrap(self):
         if not self.value_node:
@@ -273,11 +345,11 @@ class Variable(object):
 
         return self.value_node
 
-    def run(self):
+    def eval(self):
         if not self.value_node:
             raise Exception("error: Variable '" + self.name + "' unbound.")
 
-        return self.value_node.run()
+        return self.value_node.eval()
 
 class IfElse(Expression):
     def __init__(self, cond, true_body, false_body):
@@ -304,16 +376,16 @@ class IfElse(Expression):
         self.false_body = [body.unwrap() for body in self.false_body]
         return self
 
-    def run(self):
-        if self.cond.run() == True:
+    def eval(self):
+        if self.cond.eval() == True:
             result = None
             for expr in self.true_body:
-                result = expr.run()
+                result = expr.eval()
             return result
 
         result = None
         for expr in self.false_body:
-            result = expr.run()
+            result = expr.eval()
         return result
 
 class BinaryOp(Expression):
@@ -352,33 +424,33 @@ class BinaryOp(Expression):
         self.rhs = self.rhs.unwrap()
         return self
 
-    def run(self):
+    def eval(self):
         if self.op == '*':
-            return self.lhs.run() * self.rhs.run()
+            return self.lhs.eval() * self.rhs.eval()
         elif self.op == '/':
-            return self.lhs.run() / self.rhs.run()
+            return self.lhs.eval() / self.rhs.eval()
         elif self.op == '+':
-            return self.lhs.run() + self.rhs.run()
+            return self.lhs.eval() + self.rhs.eval()
         elif self.op == '-':
-            return self.lhs.run() - self.rhs.run()
+            return self.lhs.eval() - self.rhs.eval()
         elif self.op == '**':
-            return self.lhs.run() ** self.rhs.run()
+            return self.lhs.eval() ** self.rhs.eval()
         elif self.op == '<':
-            return self.lhs.run() < self.rhs.run()
+            return self.lhs.eval() < self.rhs.eval()
         elif self.op == '>':
-            return self.lhs.run() > self.rhs.run()
+            return self.lhs.eval() > self.rhs.eval()
         elif self.op == '<=':
-            return self.lhs.run() <= self.rhs.run()
+            return self.lhs.eval() <= self.rhs.eval()
         elif self.op == '>=':
-            return self.lhs.run() >= self.rhs.run()
+            return self.lhs.eval() >= self.rhs.eval()
         elif self.op == '==':
-            return self.lhs.run() == self.rhs.run()
+            return self.lhs.eval() == self.rhs.eval()
         elif self.op == '!=':
-            return self.lhs.run() != self.rhs.run()
+            return self.lhs.eval() != self.rhs.eval()
         elif self.op == 'and':
-            return self.lhs.run() and self.rhs.run()
+            return self.lhs.eval() and self.rhs.eval()
         elif self.op == 'or':
-            return self.lhs.run() or self.rhs.run()
+            return self.lhs.eval() or self.rhs.eval()
         return None
 
 class Lexer(object):
@@ -504,12 +576,9 @@ class Parser(object):
         # is this a function call?
         args = self.parse_arg_list()
         if args:
-            while type(var) == Variable:
-                var = var.unwrap()
+            func_type, ret_type = build_function_type(args)
 
-            if not isinstance(var, Function):
-                raise Exception("Type Mismatch: " + type(var).__name__ + ' != Function.')
-            return FunctionCall(var, args)
+            return FunctionCall(var, args, func_type, ret_type)
 
         return var
 
@@ -648,7 +717,9 @@ class Parser(object):
 
                 # insert symbol before parsing body to support recursive calls
                 func = Function(ident, params, table)
-                self.binding_table.insert(ident, func, -2)
+                func_var = Variable(ident)
+                func_var.bind_value(func)
+                self.binding_table.insert(ident, func_var, -2)
 
                 body, is_block = self.parse_block(['end'], True)
 
@@ -667,10 +738,13 @@ class Parser(object):
         if self.lexer.consume_expected('='):
             if type(lhs) != Variable:
                 raise Exception("error: Expected Variable on binding left hand side, got: " + type(lhs).__name__)
-            self.binding_table.insert(lhs.name, lhs)
             rhs = self.parse_expression()
             if rhs == None:
                 raise Exception("error: Expected expression on right hand side, got: " + type(rhs).__name__)
+            if not lhs.undefined:
+                # shadow previous definition
+                lhs = Variable(lhs.name)
+            self.binding_table.insert(lhs.name, lhs)
             return Binding(lhs, rhs)
 
         return lhs
@@ -711,7 +785,7 @@ def REPL():
                 expr = parser.parse_top_level()
                 if expr:
                     expr.infer_types()
-                    result = expr.run()
+                    result = expr.eval()
                     if result != None:
                         print str(result)
                     done = False
@@ -754,7 +828,7 @@ def eval_file(filename):
             exit(-1)
 
         for expr in program:
-            result = expr.run()
+            result = expr.eval()
             if result != None:
                 print str(result)
 

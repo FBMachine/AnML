@@ -1,0 +1,15 @@
+# test of first class functions
+def sq(x) -> x * x
+sq(5) == 25
+
+def test(f) -> f(4)
+test(sq) == 16
+
+x = sq
+test(x) == 16
+
+def foo(y) -> 3 * y
+
+foo(2) == 6
+
+test(foo) == 12
