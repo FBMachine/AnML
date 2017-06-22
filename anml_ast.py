@@ -44,11 +44,11 @@ class Function(object):
 
     # defer setting body to support recursive calls
     def set_body(self, body):
-        # capture closure: unwrap any bound variables
-        self.body = [expr.unwrap() for expr in body]
+        # closure support: capture value of any bound variables
+        self.body = [expr.capture_vals() for expr in body]
 
     def infer_types(self, args=[]):
-        # recurrent function guard: we're already inferring types in body
+        # recurrent function guard: return if we're already inferring types in body
         if self.inferring_types:
             return
 
@@ -73,8 +73,6 @@ class Function(object):
 
     def __str__(self):
         type_name_gen.reset()
-        # TODO: These types won't be valid until type inference is split into
-        #       a separate phase. They currently will appear to be independent.
         return "def " + self.name + ' : ' + self.val_type.get_name() + ' = <Function>'
 
     def eval(self):
@@ -88,7 +86,7 @@ class Function(object):
             # call-by-value / eager evaluation
             result = arg.eval()
             if type(result) == Function:
-                self.params[i].bind_value(arg.unwrap())
+                self.params[i].bind_value(arg.capture_vals())
             else:
                 self.params[i].bind_value(Value(result, arg.val_type))
 
@@ -106,11 +104,11 @@ class FunctionCall(object):
         self.func_type = func_type
 
     def get_function(self):
-        func = self.var.unwrap() if type(self.var) == Variable else self.var
+        func = self.var.capture_vals() if type(self.var) == Variable else self.var
         prev_var = self.var
         while func != prev_var and type(func) == Variable:
             prev_var = func
-            func = func.unwrap()
+            func = func.capture_vals()
 
         return func if type(func) == Function else None
 
@@ -122,8 +120,8 @@ class FunctionCall(object):
             unify(self.val_type, func.ret_type)
             func.infer_types(self.args)
 
-    def unwrap(self):
-        self.args = [expr.unwrap() for expr in self.args]
+    def capture_vals(self):
+        self.args = [expr.capture_vals() for expr in self.args]
 
         return self
 
@@ -136,25 +134,26 @@ class Binding(object):
         self.var = var
         self.expr = expr
         self.val_type = UnitType
+        self.cached_val = None
 
     def infer_types(self):
         self.expr.infer_types()
         self.var.bind_value(self.expr)
         self.var.infer_types()
 
-    def unwrap(self):
-        # capture closure: unwrap any bound variables
-        self.expr = self.expr.unwrap()
+    def capture_vals(self):
+        # closure support: capture value of any bound variables
+        self.expr = self.expr.capture_vals()
         return self
 
+    def __str__(self):
+        return self.var.name + ' : ' + self.var.val_type.get_name() + ' = ' + self.cached_val
+
     def eval(self):
-        result = str(self.var.eval())
-        return self.var.name + ' : ' + self.var.val_type.get_name() + ' = ' + result
+        self.cached_val = str(self.var.eval())
+        return self
 
-class Expression(object):
-    pass
-
-class Value(Expression):
+class Value(object):
     def __init__(self, value, val_type):
         self.value = value
         self.val_type = val_type
@@ -162,7 +161,7 @@ class Value(Expression):
     def infer_types(self):
         pass
 
-    def unwrap(self):
+    def capture_vals(self):
         return self
 
     def eval(self):
@@ -189,7 +188,7 @@ class Variable(object):
         elif self.undefined:
             raise Exception("error: Variable '" + self.name + "' undefined.")
 
-    def unwrap(self):
+    def capture_vals(self):
         if not self.value_node:
             return self
 
@@ -201,7 +200,7 @@ class Variable(object):
 
         return self.value_node.eval()
 
-class IfElse(Expression):
+class IfElse(object):
     def __init__(self, cond, true_body, false_body):
         self.cond = cond
         self.true_body = true_body
@@ -220,10 +219,10 @@ class IfElse(Expression):
         for expr in self.false_body:
             expr.infer_types()
 
-    def unwrap(self):
-        self.cond = self.cond.unwrap()
-        self.true_body = [body.unwrap() for body in self.true_body]
-        self.false_body = [body.unwrap() for body in self.false_body]
+    def capture_vals(self):
+        self.cond = self.cond.capture_vals()
+        self.true_body = [body.capture_vals() for body in self.true_body]
+        self.false_body = [body.capture_vals() for body in self.false_body]
         return self
 
     def eval(self):
@@ -238,7 +237,23 @@ class IfElse(Expression):
             result = expr.eval()
         return result
 
-class BinaryOp(Expression):
+class Negation(object):
+    def __init__(self, operand):
+        self.operand = operand
+        self.val_type = TypeVariable()
+
+    def infer_types(self):
+        # TODO: negation should only unify with int or float
+        unify(self.val_type, self.operand.val_type)
+
+    def capture_vals(self):
+        self.operand = self.operand.capture_vals()
+        return self
+
+    def eval(self):
+        return -self.operand.eval()
+
+class BinaryOp(object):
     def __init__(self, op, lhs, rhs):
         self.op = op
         self.lhs = lhs
@@ -269,9 +284,9 @@ class BinaryOp(Expression):
         if self.inherit_child_type:
             unify(self.val_type, self.lhs.val_type)
 
-    def unwrap(self):
-        self.lhs = self.lhs.unwrap()
-        self.rhs = self.rhs.unwrap()
+    def capture_vals(self):
+        self.lhs = self.lhs.capture_vals()
+        self.rhs = self.rhs.capture_vals()
         return self
 
     def eval(self):

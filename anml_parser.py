@@ -6,14 +6,15 @@ class Parser(object):
         self.lexer = lexer
         self.binding_table = SymbolTable()
 
-    def parse_string(self):
+    def parse_string(self, is_neg):
         string = self.lexer.consume_string()
         if string != None:
+            if is_neg:
+                raise Exception("Unexpected negation of string.")
             return Value(string, StringType)
         return None
 
-    def parse_number(self):
-        is_neg = self.lexer.consume_expected('-')
+    def parse_number(self, is_neg):
         val = self.lexer.consume_number()
         if val != None:
             neg = '-' if is_neg else ''
@@ -23,17 +24,19 @@ class Parser(object):
                 return Value(int(neg + val), IntType)
         return None
 
-    def parse_bool(self):
+    def parse_bool(self, is_neg):
         if self.lexer.consume_expected('true'):
+            if is_neg:
+                raise Exception("Unexpected negation of string.")
             return Value(True, BoolType)
         elif self.lexer.consume_expected('false'):
+            if is_neg:
+                raise Exception("Unexpected negation of string.")
             return Value(False, BoolType)
 
         return None
 
-    def parse_ident(self):
-        is_neg = self.lexer.consume_expected('-')
-
+    def parse_ident(self, is_neg):
         name = self.lexer.consume_ident()
         if name == None:
             return None
@@ -43,27 +46,36 @@ class Parser(object):
             var = Variable(name)
             self.binding_table.insert(name, var)
 
+        expr = var
+
         # is this a function call?
         args = self.parse_arg_list()
         if args:
             func_type, ret_type = build_function_type(args)
 
-            return FunctionCall(var, args, func_type, ret_type)
+            expr = FunctionCall(var, args, func_type, ret_type)
 
-        return var
+        if is_neg:
+            expr = Negation(expr)
 
-    def parse_paren_expression(self):
+        return expr
+
+    def parse_paren_expression(self, is_neg):
         if self.lexer.consume_expected('('):
             expr = self.parse_expression()
             if not expr:
                 raise Exception("error: Missing expected expression.")
             if not self.lexer.consume_expected(')'):
                 raise Exception("error: Missing closing ')'.")
+
+            if is_neg:
+                expr = Negation(expr)
             return expr
         return None
 
     def parse_atom(self):
-        return self.parse_number() or self.parse_bool() or self.parse_string() or self.parse_paren_expression() or self.parse_ident()
+        is_neg = self.lexer.consume_expected('-')
+        return self.parse_number(is_neg) or self.parse_bool(is_neg) or self.parse_string(is_neg) or self.parse_paren_expression(is_neg) or self.parse_ident(is_neg)
 
     def parse_binary_expression(self, precedence=0):
         all_ops = [["or"],["and"],["<",">","==","!=",">=","<="],["+", "-"],["*", "/"], ["**"]]

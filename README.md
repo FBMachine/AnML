@@ -58,6 +58,16 @@ y : int = 2
 >>> triple(5)
 15
 
+# function are first class citizens:
+>>> def call_func(f) -> f(4)
+def call_func : ((int) -> a) -> a = <Function>
+>>> call_func(sqr)
+16
+>>> sq = sqr
+sq : (int) -> int = def sqr : (int) -> int = <Function>
+>>> test(sq)
+16
+
 # More examples:
 >>> def min(a,b) ->
       if a < b -> a
