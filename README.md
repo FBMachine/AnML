@@ -3,7 +3,7 @@
 * User friendly syntax
 * Hindley-Milner type system with type inference
 
-```python
+```ruby
 $ python anml.py # recommended: rlwrap python anml.py
 # blocks use '->' for a single expression
 >>> def sqr(x) -> x * x
